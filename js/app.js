@@ -1,0 +1,209 @@
+(function () {
+  "use strict";
+
+  const els = {
+    pairingScreen: document.getElementById("screen-pairing"),
+    controlScreen: document.getElementById("screen-control"),
+    codeInput: document.getElementById("code-input"),
+    connectBtn: document.getElementById("connect-btn"),
+    statusLine: document.getElementById("status-line"),
+    trustPanel: document.getElementById("trust-panel"),
+    trustLink: document.getElementById("trust-link"),
+    downloadAddonBtn: document.getElementById("download-addon-btn"),
+    installInstructions: document.getElementById("install-instructions"),
+    connDot: document.getElementById("conn-dot"),
+    connLabel: document.getElementById("conn-label"),
+    disconnectBtn: document.getElementById("disconnect-btn"),
+    motionGate: document.getElementById("motion-gate"),
+    enableMotionBtn: document.getElementById("enable-motion-btn"),
+    controlPanels: document.getElementById("control-panels"),
+    recenterBtn: document.getElementById("recenter-btn"),
+    zoomSlider: document.getElementById("zoom-slider"),
+    zoomValue: document.getElementById("zoom-value"),
+    smoothingSlider: document.getElementById("smoothing-slider"),
+    smoothingValue: document.getElementById("smoothing-value"),
+    controlError: document.getElementById("control-error"),
+  };
+
+  let wsClient = null;
+  let sensors = null;
+  let pendingRecenter = false;
+  let connectTrustTimer = null;
+
+  function showScreen(name) {
+    els.pairingScreen.dataset.active = String(name === "pairing");
+    els.controlScreen.dataset.active = String(name === "control");
+  }
+
+  function setStatus(text, isError) {
+    els.statusLine.textContent = text || "";
+    els.statusLine.classList.toggle("status-line-error", Boolean(isError));
+  }
+
+  function setConnLabel(text, warn) {
+    els.connLabel.textContent = text;
+    els.connDot.classList.toggle("dot-warn", Boolean(warn));
+  }
+
+  function formatCodeInput() {
+    const raw = els.codeInput.value.toUpperCase().replace(/[^A-Z2-7]/g, "");
+    const groups = raw.match(/.{1,4}/g) || [];
+    els.codeInput.value = groups.slice(0, 4).join("-");
+  }
+
+  function currentZoom() {
+    return Number(els.zoomSlider.value) / 100;
+  }
+
+  function currentSmoothing() {
+    return Number(els.smoothingSlider.value) / 100;
+  }
+
+  function onSensorSample(sample) {
+    const payload = {
+      ...sample,
+      zoom: currentZoom(),
+      smoothing: currentSmoothing(),
+    };
+    if (pendingRecenter) {
+      payload.recenter = true;
+      pendingRecenter = false;
+    }
+    wsClient.send(payload);
+  }
+
+  async function beginMotionCapture() {
+    const granted = await sensors.requestPermissionIfNeeded();
+    if (!granted) {
+      els.controlError.hidden = false;
+      els.controlError.textContent =
+        "Motion permission denied. Enable it in Settings → Safari → Motion & Orientation Access, then reload.";
+      return;
+    }
+    els.motionGate.hidden = true;
+    els.controlPanels.hidden = false;
+    els.controlError.hidden = true;
+    sensors.start(onSensorSample);
+  }
+
+  function needsExplicitMotionGesture() {
+    return (
+      (typeof DeviceOrientationEvent !== "undefined" &&
+        typeof DeviceOrientationEvent.requestPermission === "function") ||
+      (typeof DeviceMotionEvent !== "undefined" &&
+        typeof DeviceMotionEvent.requestPermission === "function")
+    );
+  }
+
+  function enterControlScreen(ip, port, tokenHex) {
+    showScreen("control");
+    setConnLabel("Streaming", false);
+    els.controlError.hidden = true;
+
+    sensors = createSensorSession();
+
+    if (needsExplicitMotionGesture()) {
+      els.motionGate.hidden = false;
+      els.controlPanels.hidden = true;
+    } else {
+      els.motionGate.hidden = true;
+      els.controlPanels.hidden = false;
+      sensors.start(onSensorSample);
+    }
+  }
+
+  function teardownSession() {
+    if (sensors) {
+      sensors.stop();
+      sensors = null;
+    }
+    if (wsClient) {
+      wsClient.close();
+      wsClient = null;
+    }
+    if (connectTrustTimer) {
+      clearTimeout(connectTrustTimer);
+      connectTrustTimer = null;
+    }
+  }
+
+  function attemptConnect() {
+    let parsed;
+    try {
+      parsed = decodePairingCode(els.codeInput.value);
+    } catch (err) {
+      setStatus(err.message || "Invalid pairing code.", true);
+      return;
+    }
+
+    const { ip, port, tokenHex } = parsed;
+
+    els.connectBtn.disabled = true;
+    setStatus("Connecting…", false);
+    els.trustLink.href = `https://${ip}:${port}/pair`;
+
+    // A failed handshake (bad code, or an untrusted TLS cert) is
+    // indistinguishable from JS's perspective — browsers don't expose the
+    // HTTP status of a rejected WebSocket upgrade. Surface the trust-cert
+    // path proactively rather than guessing at a more specific reason.
+    connectTrustTimer = setTimeout(() => {
+      els.trustPanel.hidden = false;
+    }, 3500);
+
+    wsClient = createWsClient({
+      ip,
+      port,
+      tokenHex,
+      onOpen: () => {
+        clearTimeout(connectTrustTimer);
+        els.trustPanel.hidden = true;
+        els.connectBtn.disabled = false;
+        setStatus("", false);
+        enterControlScreen(ip, port, tokenHex);
+      },
+      onClose: () => {
+        if (els.controlScreen.dataset.active === "true") {
+          setConnLabel("Reconnecting…", true);
+        } else {
+          els.connectBtn.disabled = false;
+          setStatus("Couldn't connect. Check the code, or trust the connection below.", true);
+          els.trustPanel.hidden = false;
+        }
+      },
+      onGiveUp: () => {
+        setConnLabel("Disconnected", true);
+        els.controlError.hidden = false;
+        els.controlError.textContent = "Lost connection to Blender. Reconnect from the pairing screen.";
+      },
+    });
+  }
+
+  els.downloadAddonBtn.addEventListener("click", () => {
+    els.installInstructions.hidden = false;
+  });
+
+  els.codeInput.addEventListener("input", formatCodeInput);
+
+  els.connectBtn.addEventListener("click", attemptConnect);
+
+  els.enableMotionBtn.addEventListener("click", beginMotionCapture);
+
+  els.recenterBtn.addEventListener("click", () => {
+    if (sensors) sensors.recenter();
+    pendingRecenter = true;
+  });
+
+  els.zoomSlider.addEventListener("input", () => {
+    els.zoomValue.textContent = `${els.zoomSlider.value}%`;
+  });
+
+  els.smoothingSlider.addEventListener("input", () => {
+    els.smoothingValue.textContent = `${els.smoothingSlider.value}%`;
+  });
+
+  els.disconnectBtn.addEventListener("click", () => {
+    teardownSession();
+    showScreen("pairing");
+    setStatus("", false);
+  });
+})();
