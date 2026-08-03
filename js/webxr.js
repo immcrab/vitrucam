@@ -33,23 +33,36 @@
   }
 
   // WebXR is right-handed Y-up (X right, Y up, Z toward the viewer).
-  // Blender is right-handed Z-up (X right, Y forward, Z up). A -90deg
-  // rotation about X maps one onto the other — the same convention
-  // sensors.js's CORRECTION quaternion establishes for the gyro path, so
-  // both sources land in the same Blender-space frame regardless of
-  // which one is active.
-  const HALF = -Math.PI / 4;
-  const S = Math.sin(HALF), C = Math.cos(HALF);
-  const CHANGE_OF_BASIS = [S, 0, 0, C]; // -90deg about X, (x,y,z,w)
-  const CHANGE_OF_BASIS_INV = [-S, 0, 0, C]; // +90deg about X
+  // Blender is right-handed Z-up (X right, Y forward, Z up). A +90deg
+  // rotation about X maps webxr-world vectors onto blender-world vectors
+  // (Y_webxr "up" -> Z_blender "up", Z_webxr "toward viewer" ->
+  // -Y_blender, i.e. away-from-viewer/-Z_webxr -> +Y_blender "forward").
+  //
+  // For position (a plain vector) that world-basis change is applied by
+  // just rotating the vector through WORLD_CHANGE_OF_BASIS.
+  //
+  // For orientation, WebXR's viewer-local axes (forward -Z, up +Y, right
+  // +X) already match Blender's camera-local convention exactly, so
+  // there's no local-frame correction needed — only the world frame
+  // differs. That means the fix is a plain LEFT multiply by
+  // WORLD_CHANGE_OF_BASIS (re-expressing the same local-to-world
+  // rotation in Blender's world coordinates), not a conjugation: a
+  // conjugate (A q A^-1) instead re-defines what "local" means, which
+  // silently swaps which physical motion counts as yaw vs. roll — that
+  // was the previous bug here.
+  const WORLD_CHANGE_OF_BASIS = [Math.SQRT1_2, 0, 0, Math.SQRT1_2]; // +90deg about X, (x,y,z,w)
+  const WORLD_CHANGE_OF_BASIS_CONJ = [-Math.SQRT1_2, 0, 0, Math.SQRT1_2];
 
   function remapPosition(p) {
-    return { x: p.x, y: p.z, z: -p.y };
+    const [rx, ry, rz] = quatMultiply(
+      quatMultiply(WORLD_CHANGE_OF_BASIS, [p.x, p.y, p.z, 0]),
+      WORLD_CHANGE_OF_BASIS_CONJ
+    );
+    return { x: rx, y: ry, z: rz };
   }
 
   function remapOrientation(q) {
-    const combined = quatMultiply(quatMultiply(CHANGE_OF_BASIS, [q.x, q.y, q.z, q.w]), CHANGE_OF_BASIS_INV);
-    return combined;
+    return quatMultiply(WORLD_CHANGE_OF_BASIS, [q.x, q.y, q.z, q.w]);
   }
 
   function createXrSession() {

@@ -1,43 +1,56 @@
 // Turns raw DeviceOrientation/DeviceMotion events into Blender-space
 // {x,y,z,qx,qy,qz,qw} samples.
 //
-// Rotation: alpha/beta/gamma (the W3C "Z-X'-Y''" Tait-Bryan angles) are
-// converted to a quaternion using the standard device-orientation formula,
-// then rotated by a fixed offset so the phone's "out the back" direction
-// (the way you'd naturally aim it like a camera) maps to Blender's
-// camera-forward (-Z) with the phone's top edge mapping to camera-up (+Y).
-// There's no universally "correct" mapping for this — every phone-as-
-// camera tool picks a convention — so the Recenter control exists to let
-// the operator zero out any residual yaw/tilt offset by holding the
-// phone in their intended "forward" pose and tapping it.
+// Rotation: driven primarily by DeviceMotion's rotationRate (gyroscope,
+// deg/s about the device's own body axes), integrated into a running
+// quaternion each sample. This is deliberately NOT recomputed from
+// alpha/beta/gamma every event: that Tait-Bryan decomposition has a real
+// gimbal-lock singularity at beta = +-90 degrees, which is exactly the
+// pose of "phone held upright like a camera" — the primary use case here.
+// Near that pose, alpha (compass yaw) and gamma (roll) become numerically
+// coupled, so continuously re-deriving the quaternion from them makes a
+// physical yaw motion show up partly/wholly as roll (and vice versa).
+// Gyro integration has no such singularity. alpha/beta/gamma are still
+// used to bootstrap the very first reading (before any gyro data has
+// arrived) and, once gyro is flowing, to apply a very light drift
+// correction — same idea as any complementary filter, just heavily
+// weighted toward the gyro so its own singularity-adjacent noise can't
+// dominate. If a browser exposes no rotationRate at all, orientation
+// events drive rotation directly as before (still singularity-prone, but
+// strictly better than no rotation).
+//
+// Both the gyro-integrated and orientation-derived quaternions are sent
+// as-is: the device's flat-frame axes (X right, Y toward the top edge, Z
+// out of the screen toward the viewer) already match Blender's
+// camera-local convention once "out the back" (-Z device) is read as
+// camera-forward and "top edge" (+Y device) as camera-up, so no extra
+// correction quaternion is needed. There's no universally "correct"
+// absolute mapping though — every phone-as-camera tool picks a
+// convention — so the Recenter control exists to let the operator zero
+// out any residual yaw/tilt offset by holding the phone in their
+// intended "forward" pose and tapping it.
 //
 // Position: DeviceMotion's linear acceleration (gravity already removed
 // by the browser when available) is double-integrated with velocity
-// damping to bound drift. This is inherently approximate — there is no
-// drift-free position from phone-only accelerometer data — so Recenter
-// also zeroes the integrated position back to the origin.
+// damping to bound drift. Damping is applied as a per-second decay (not
+// a flat per-sample multiplier) so it doesn't eat a normal hand movement
+// before it has a chance to accumulate into visible position change.
+// This is inherently approximate — there is no drift-free position from
+// phone-only accelerometer data — so Recenter also zeroes the integrated
+// position back to the origin.
 (function (global) {
   "use strict";
 
   const DEG2RAD = Math.PI / 180;
-  const VELOCITY_DAMPING = 0.90; // per-sample decay to bound accel drift
+  const VELOCITY_DAMPING_PER_SECOND = 0.35; // fraction of velocity kept after a full second of no further accel
   const ACCEL_DEADZONE = 0.08; // m/s^2, ignore sensor noise below this
-  const ROTATION_SMOOTH_T = 0.45; // per-sample nlerp weight toward the new raw reading
+  const ROTATION_SMOOTH_T = 0.45; // per-sample nlerp weight toward raw orientation, used only when no gyro is available
+  const ROTATION_DRIFT_CORRECTION_T = 0.02; // per-sample nlerp weight pulling gyro-integrated rotation toward the raw absolute reading
   const ROTATION_JUMP_REJECT_DOT = 0.3; // below this dot product, treat as a sensor glitch and drop the sample
   const GRAVITY_LPF = 0.95; // slow-adapting gravity estimate, used when the browser only gives gravity-included accel
 
   function hasNumericFields(v) {
     return !!v && typeof v.x === "number" && typeof v.y === "number" && typeof v.z === "number";
-  }
-
-  // Fixed corrective rotation: -90 degrees about the device X axis,
-  // mapping the device's "world" frame onto Blender's camera convention.
-  const CORRECTION = quatFromAxisAngle([1, 0, 0], -Math.PI / 2);
-
-  function quatFromAxisAngle(axis, angle) {
-    const half = angle / 2;
-    const s = Math.sin(half);
-    return [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(half)];
   }
 
   function quatMultiply(a, b) {
@@ -72,7 +85,8 @@
     return [rx / len, ry / len, rz / len, rw / len];
   }
 
-  function orientationToQuaternion(alpha, beta, gamma) {
+  // Raw device-world orientation from alpha/beta/gamma.
+  function orientationToWorldQuaternion(alpha, beta, gamma) {
     const z = (alpha || 0) * DEG2RAD;
     const x = (beta || 0) * DEG2RAD;
     const y = (gamma || 0) * DEG2RAD;
@@ -86,18 +100,35 @@
     const qy = cX * sY * cZ + sX * cY * sZ;
     const qz = cX * cY * sZ + sX * sY * cZ;
 
-    return quatMultiply([qx, qy, qz, w], CORRECTION);
+    return [qx, qy, qz, w];
+  }
+
+  function quatNormalize(a) {
+    const [x, y, z, w] = a;
+    const len = Math.hypot(x, y, z, w) || 1;
+    return [x / len, y / len, z / len, w / len];
+  }
+
+  // Small-angle body-frame rotation from an angular velocity vector
+  // (rad/s) integrated over dt seconds — the standard quaternion
+  // kinematics update, with no Euler-angle decomposition anywhere in it,
+  // so it carries no gimbal-lock singularity.
+  function bodyDeltaQuaternion(wx, wy, wz, dt) {
+    const half = dt / 2;
+    return quatNormalize([wx * half, wy * half, wz * half, 1]);
   }
 
   function createSensorSession() {
     let position = { x: 0, y: 0, z: 0 };
     let velocity = { x: 0, y: 0, z: 0 };
     let lastMotionTime = null;
+    let lastGyroTime = null;
     let sampleHandler = null;
     let orientationListener = null;
     let motionListener = null;
-    let latestQuat = [0, 0, 0, 1]; // always defined, so emitSample() never crashes before the first reading
-    let rawQuatForSmoothing = null; // null until the first real orientation event
+    let worldQuat = null; // device-world orientation; null until the first orientation event seeds it
+    let latestQuat = [0, 0, 0, 1]; // same as worldQuat once seeded; always defined so emitSample() never crashes before the first reading
+    let hasGyro = false; // true once a devicemotion event has delivered a usable rotationRate
     let gravityEstimate = null; // {x,y,z}, only used when accelerationIncludingGravity is the only field available
 
     function emitSample() {
@@ -113,6 +144,20 @@
       });
     }
 
+    function applyWorldQuat(q) {
+      // The device's own flat-frame axes (X right, Y toward the top edge,
+      // Z out of the screen toward the viewer) already line up exactly
+      // with Blender's camera-local convention (X right, Y up, -Z
+      // forward) once "out the back" (-Z device) is read as
+      // camera-forward and "top edge" (+Y device) as camera-up — so no
+      // extra local-frame correction quaternion is needed here. (An
+      // earlier -90-about-X "CORRECTION" step used to live here; it
+      // silently swapped yaw and roll, which is what made turning the
+      // phone left/right show up as tilting up/down.)
+      worldQuat = quatNormalize(q);
+      latestQuat = worldQuat;
+    }
+
     function handleOrientation(event) {
       if (typeof event.alpha !== "number" || typeof event.beta !== "number" || typeof event.gamma !== "number") {
         // Incomplete reading — common for the first event or two before
@@ -124,27 +169,74 @@
         return;
       }
 
-      const raw = orientationToQuaternion(event.alpha, event.beta, event.gamma);
+      const raw = orientationToWorldQuaternion(event.alpha, event.beta, event.gamma);
 
-      if (rawQuatForSmoothing) {
-        const dot = Math.abs(quatDot(rawQuatForSmoothing, raw));
+      if (worldQuat === null) {
+        // Bootstrap: nothing to integrate from yet, so this one absolute
+        // reading (taken as-is, singularity risk and all) becomes the
+        // starting point. A single bad sample here is far less harmful
+        // than continuously re-deriving orientation from this formula.
+        applyWorldQuat(raw);
+        emitSample();
+        return;
+      }
+
+      if (!hasGyro) {
+        // No rotationRate available on this device/browser: fall back to
+        // driving rotation directly from orientation events, same as
+        // before (still gimbal-lock-prone near beta=90, but better than
+        // no rotation at all).
+        const dot = Math.abs(quatDot(worldQuat, raw));
         if (dot < ROTATION_JUMP_REJECT_DOT) {
           // Sudden large jump (compass glitch, gimbal-lock discontinuity
           // in the alpha/beta/gamma formula) — drop this one reading
           // rather than snapping the camera to it.
           return;
         }
-        latestQuat = nlerpQuat(latestQuat, raw, ROTATION_SMOOTH_T);
-      } else {
-        latestQuat = raw;
+        applyWorldQuat(nlerpQuat(worldQuat, raw, ROTATION_SMOOTH_T));
+        emitSample();
+        return;
       }
 
-      rawQuatForSmoothing = raw;
+      // Gyro is driving rotation continuously (see handleMotion); this is
+      // just a gentle long-term drift correction, so a low weight keeps
+      // any single glitchy/singularity-adjacent reading from doing
+      // visible damage — it gets averaged out over many samples instead.
+      applyWorldQuat(nlerpQuat(worldQuat, raw, ROTATION_DRIFT_CORRECTION_T));
+      // No emitSample() here: the gyro integration step already emits
+      // every sample at its own (typically higher) rate.
+    }
+
+    function integrateGyro(rotationRate, dt) {
+      if (worldQuat === null || dt <= 0) return;
+      hasGyro = true;
+
+      // DeviceRotationRate's alpha/beta/gamma are angular velocity about
+      // the device's own Z/X/Y axes respectively (deg/s) — same axis
+      // labeling as the orientation event, but body-frame rates, so this
+      // integration has no Euler-angle decomposition and no singularity.
+      const wx = (rotationRate.beta || 0) * DEG2RAD;
+      const wy = (rotationRate.gamma || 0) * DEG2RAD;
+      const wz = (rotationRate.alpha || 0) * DEG2RAD;
+
+      const delta = bodyDeltaQuaternion(wx, wy, wz, dt);
+      applyWorldQuat(quatMultiply(worldQuat, delta));
       emitSample();
     }
 
     function handleMotion(event) {
       const now = event.timeStamp || performance.now();
+
+      if (event.rotationRate && typeof event.rotationRate.alpha === "number") {
+        if (lastGyroTime === null) {
+          lastGyroTime = now;
+        } else {
+          const gdt = Math.min((now - lastGyroTime) / 1000, 0.1);
+          lastGyroTime = now;
+          integrateGyro(event.rotationRate, gdt);
+        }
+      }
+
       let ax, ay, az;
 
       if (hasNumericFields(event.acceleration)) {
@@ -184,11 +276,18 @@
       lastMotionTime = now;
       if (dt <= 0) return;
 
+      // Per-second decay (not a flat per-sample multiplier) so the decay
+      // rate doesn't depend on how often devicemotion happens to fire —
+      // at a typical ~60Hz, a flat 0.90-per-sample factor would have cut
+      // velocity to near zero within a couple of tens of milliseconds,
+      // erasing a normal accelerate-then-decelerate hand movement before
+      // it could integrate into any visible position change at all.
+      const damping = Math.pow(VELOCITY_DAMPING_PER_SECOND, dt);
       const accel = { x: ax, y: ay, z: az };
       ["x", "y", "z"].forEach((axis) => {
         let a = accel[axis];
         if (Math.abs(a) < ACCEL_DEADZONE) a = 0;
-        velocity[axis] = (velocity[axis] + a * dt) * VELOCITY_DAMPING;
+        velocity[axis] = (velocity[axis] + a * dt) * damping;
         position[axis] += velocity[axis] * dt;
       });
 
@@ -223,6 +322,7 @@
       orientationListener = handleOrientation;
       motionListener = handleMotion;
       lastMotionTime = null;
+      lastGyroTime = null;
       window.addEventListener("deviceorientation", orientationListener, true);
       window.addEventListener("devicemotion", motionListener, true);
     }
