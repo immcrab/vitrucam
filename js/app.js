@@ -79,6 +79,7 @@
   function onSensorSample(sample) {
     const payload = {
       ...sample,
+      t: Date.now(),
       zoom: currentZoom(),
       smoothing: currentSmoothing(),
     };
@@ -216,6 +217,20 @@
     }
 
     const { ip, port, tokenHex } = parsed;
+
+    // A prior failed attempt may still have a socket alive with its own
+    // reconnect loop running (ws-client.js retries on unexpected close).
+    // Leaving it running would let it race this new attempt for the
+    // addon's single-session slot, or fire a stray onOpen/trust-panel
+    // callback after this attempt has already resolved.
+    if (wsClient) {
+      wsClient.close();
+      wsClient = null;
+    }
+    if (connectTrustTimer) {
+      clearTimeout(connectTrustTimer);
+      connectTrustTimer = null;
+    }
 
     els.connectBtn.disabled = true;
     setStatus("Connecting…", false);
