@@ -24,6 +24,11 @@
   const ACCEL_DEADZONE = 0.08; // m/s^2, ignore sensor noise below this
   const ROTATION_SMOOTH_T = 0.45; // per-sample nlerp weight toward the new raw reading
   const ROTATION_JUMP_REJECT_DOT = 0.3; // below this dot product, treat as a sensor glitch and drop the sample
+  const GRAVITY_LPF = 0.95; // slow-adapting gravity estimate, used when the browser only gives gravity-included accel
+
+  function hasNumericFields(v) {
+    return !!v && typeof v.x === "number" && typeof v.y === "number" && typeof v.z === "number";
+  }
 
   // Fixed corrective rotation: -90 degrees about the device X axis,
   // mapping the device's "world" frame onto Blender's camera convention.
@@ -93,6 +98,7 @@
     let motionListener = null;
     let latestQuat = [0, 0, 0, 1]; // always defined, so emitSample() never crashes before the first reading
     let rawQuatForSmoothing = null; // null until the first real orientation event
+    let gravityEstimate = null; // {x,y,z}, only used when accelerationIncludingGravity is the only field available
 
     function emitSample() {
       if (!sampleHandler) return;
@@ -108,6 +114,16 @@
     }
 
     function handleOrientation(event) {
+      if (typeof event.alpha !== "number" || typeof event.beta !== "number" || typeof event.gamma !== "number") {
+        // Incomplete reading — common for the first event or two before
+        // the sensor finishes calibrating. Blender uses the first sample
+        // it ever receives as the "zero" reference pose, so sending a
+        // null/zero reading here would make that reference garbage and
+        // the camera would jump away from its starting pose almost
+        // immediately once real readings arrive.
+        return;
+      }
+
       const raw = orientationToQuaternion(event.alpha, event.beta, event.gamma);
 
       if (rawQuatForSmoothing) {
@@ -128,10 +144,38 @@
     }
 
     function handleMotion(event) {
-      const accel = event.acceleration || event.accelerationIncludingGravity;
       const now = event.timeStamp || performance.now();
+      let ax, ay, az;
 
-      if (!accel || lastMotionTime === null) {
+      if (hasNumericFields(event.acceleration)) {
+        // Best case: the browser already removed gravity for us.
+        ax = event.acceleration.x;
+        ay = event.acceleration.y;
+        az = event.acceleration.z;
+      } else if (hasNumericFields(event.accelerationIncludingGravity)) {
+        // Common case (most Android/Chrome devices): only the
+        // gravity-included reading is populated — event.acceleration
+        // exists as an object but with null x/y/z, which doesn't fall
+        // through a plain `||` fallback. Estimate gravity ourselves as a
+        // slow low-pass of this signal and subtract it.
+        const g = event.accelerationIncludingGravity;
+        if (!gravityEstimate) {
+          gravityEstimate = { x: g.x, y: g.y, z: g.z };
+        } else {
+          gravityEstimate.x = gravityEstimate.x * GRAVITY_LPF + g.x * (1 - GRAVITY_LPF);
+          gravityEstimate.y = gravityEstimate.y * GRAVITY_LPF + g.y * (1 - GRAVITY_LPF);
+          gravityEstimate.z = gravityEstimate.z * GRAVITY_LPF + g.z * (1 - GRAVITY_LPF);
+        }
+        ax = g.x - gravityEstimate.x;
+        ay = g.y - gravityEstimate.y;
+        az = g.z - gravityEstimate.z;
+      } else {
+        // Neither field is usable on this device/browser at all.
+        lastMotionTime = now;
+        return;
+      }
+
+      if (lastMotionTime === null) {
         lastMotionTime = now;
         return;
       }
@@ -140,8 +184,9 @@
       lastMotionTime = now;
       if (dt <= 0) return;
 
+      const accel = { x: ax, y: ay, z: az };
       ["x", "y", "z"].forEach((axis) => {
-        let a = accel[axis] || 0;
+        let a = accel[axis];
         if (Math.abs(a) < ACCEL_DEADZONE) a = 0;
         velocity[axis] = (velocity[axis] + a * dt) * VELOCITY_DAMPING;
         position[axis] += velocity[axis] * dt;
