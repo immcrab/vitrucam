@@ -109,6 +109,12 @@
       </div>
 
       <div id="control-panels" class="control-panels" hidden>
+        <div id="ar-card" class="card ar-card" hidden>
+          <p class="ar-title">AR tracking available</p>
+          <p class="hint">Uses your camera to track real, accurate movement — no drift. Recommended over the default motion tracking.</p>
+          <button id="ar-toggle-btn" class="btn btn-secondary" type="button">Start AR Tracking</button>
+        </div>
+
         <button id="recenter-btn" class="btn btn-secondary recenter-btn" type="button">
           Recenter
         </button>
@@ -140,6 +146,7 @@
 <script src="js/pairing.js"></script>
 <script src="js/ws-client.js"></script>
 <script src="js/sensors.js"></script>
+<script src="js/webxr.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

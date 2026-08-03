@@ -317,6 +317,24 @@ body {
   margin: 0 auto;
 }
 
+.ar-card {
+  text-align: center;
+}
+
+.ar-title {
+  margin: 0 0 0.3rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.ar-card .hint {
+  margin-bottom: 0.9rem;
+}
+
+.ar-card .btn {
+  width: 100%;
+}
+
 .viewfinder {
   position: relative;
   width: 100%;

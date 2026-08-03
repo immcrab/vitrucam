@@ -25,10 +25,13 @@
     controlError: document.getElementById("control-error"),
     cameraPreview: document.getElementById("camera-preview"),
     viewfinderPlaceholder: document.getElementById("viewfinder-placeholder"),
+    arCard: document.getElementById("ar-card"),
+    arToggleBtn: document.getElementById("ar-toggle-btn"),
   };
 
   let wsClient = null;
   let sensors = null;
+  let xrSession = null;
   let pendingRecenter = false;
   let connectTrustTimer = null;
   let previousPreviewUrl = null;
@@ -109,10 +112,59 @@
     );
   }
 
+  async function offerArTrackingIfSupported() {
+    if (typeof isWebXrArSupported !== "function") return;
+    const supported = await isWebXrArSupported();
+    if (supported) {
+      els.arCard.hidden = false;
+    }
+  }
+
+  async function startArTracking() {
+    els.arToggleBtn.disabled = true;
+    try {
+      if (sensors) sensors.stop();
+      xrSession = createXrSession();
+      await xrSession.start({
+        onSample: onSensorSample,
+        overlayElement: els.controlScreen,
+        onEnd: () => {
+          xrSession = null;
+          els.arToggleBtn.textContent = "Start AR Tracking";
+          els.arToggleBtn.disabled = false;
+          if (sensors) sensors.start(onSensorSample);
+        },
+        onError: () => {
+          xrSession = null;
+          els.controlError.hidden = false;
+          els.controlError.textContent = "Couldn't start AR tracking on this device. Falling back to motion tracking.";
+          if (sensors) sensors.start(onSensorSample);
+        },
+      });
+      els.arToggleBtn.textContent = "Stop AR Tracking";
+      els.arToggleBtn.disabled = false;
+      pendingRecenter = true;
+    } catch (err) {
+      els.arToggleBtn.disabled = false;
+    }
+  }
+
+  function stopArTracking() {
+    if (xrSession) {
+      xrSession.stop();
+      xrSession = null;
+    }
+    els.arToggleBtn.textContent = "Start AR Tracking";
+    if (sensors) sensors.start(onSensorSample);
+    pendingRecenter = true;
+  }
+
   function enterControlScreen(ip, port, tokenHex) {
     showScreen("control");
     setConnLabel("Streaming", false);
     els.controlError.hidden = true;
+    els.arCard.hidden = true;
+    els.arToggleBtn.textContent = "Start AR Tracking";
 
     sensors = createSensorSession();
 
@@ -124,9 +176,15 @@
       els.controlPanels.hidden = false;
       sensors.start(onSensorSample);
     }
+
+    offerArTrackingIfSupported();
   }
 
   function teardownSession() {
+    if (xrSession) {
+      xrSession.stop();
+      xrSession = null;
+    }
     if (sensors) {
       sensors.stop();
       sensors = null;
@@ -209,6 +267,14 @@
   els.connectBtn.addEventListener("click", attemptConnect);
 
   els.enableMotionBtn.addEventListener("click", beginMotionCapture);
+
+  els.arToggleBtn.addEventListener("click", () => {
+    if (xrSession) {
+      stopArTracking();
+    } else {
+      startArTracking();
+    }
+  });
 
   els.recenterBtn.addEventListener("click", () => {
     if (sensors) sensors.recenter();
