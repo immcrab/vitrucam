@@ -98,6 +98,11 @@
     </header>
 
     <div class="control-body">
+      <div class="viewfinder">
+        <img id="camera-preview" class="viewfinder-img" alt="Blender camera view" hidden />
+        <span id="viewfinder-placeholder" class="viewfinder-placeholder">Waiting for camera view…</span>
+      </div>
+
       <div id="motion-gate" class="card motion-gate">
         <p>Motion access is required to track the camera.</p>
         <button id="enable-motion-btn" class="btn btn-primary" type="button">Enable Motion Tracking</button>

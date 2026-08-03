@@ -23,12 +23,26 @@
     smoothingSlider: document.getElementById("smoothing-slider"),
     smoothingValue: document.getElementById("smoothing-value"),
     controlError: document.getElementById("control-error"),
+    cameraPreview: document.getElementById("camera-preview"),
+    viewfinderPlaceholder: document.getElementById("viewfinder-placeholder"),
   };
 
   let wsClient = null;
   let sensors = null;
   let pendingRecenter = false;
   let connectTrustTimer = null;
+  let previousPreviewUrl = null;
+
+  function onPreviewFrame(blob) {
+    const url = URL.createObjectURL(blob);
+    els.cameraPreview.src = url;
+    els.cameraPreview.hidden = false;
+    els.viewfinderPlaceholder.hidden = true;
+    if (previousPreviewUrl) {
+      URL.revokeObjectURL(previousPreviewUrl);
+    }
+    previousPreviewUrl = url;
+  }
 
   function showScreen(name) {
     els.pairingScreen.dataset.active = String(name === "pairing");
@@ -125,6 +139,13 @@
       clearTimeout(connectTrustTimer);
       connectTrustTimer = null;
     }
+    if (previousPreviewUrl) {
+      URL.revokeObjectURL(previousPreviewUrl);
+      previousPreviewUrl = null;
+    }
+    els.cameraPreview.hidden = true;
+    els.cameraPreview.removeAttribute("src");
+    els.viewfinderPlaceholder.hidden = false;
   }
 
   function attemptConnect() {
@@ -175,6 +196,7 @@
         els.controlError.hidden = false;
         els.controlError.textContent = "Lost connection to Blender. Reconnect from the pairing screen.";
       },
+      onPreviewFrame,
     });
   }
 

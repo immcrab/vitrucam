@@ -11,7 +11,7 @@
   const RECONNECT_DELAY_MS = 1500;
   const MAX_RECONNECT_ATTEMPTS = 5;
 
-  function createWsClient({ ip, port, tokenHex, onOpen, onClose, onError, onGiveUp }) {
+  function createWsClient({ ip, port, tokenHex, onOpen, onClose, onError, onGiveUp, onPreviewFrame }) {
     let socket = null;
     let manualClose = false;
     let reconnectAttempts = 0;
@@ -40,6 +40,12 @@
 
       socket.onerror = () => {
         if (onError) onError();
+      };
+
+      socket.onmessage = (event) => {
+        if (onPreviewFrame && event.data instanceof Blob) {
+          onPreviewFrame(event.data);
+        }
       };
     }
 

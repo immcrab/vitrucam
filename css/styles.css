@@ -317,6 +317,33 @@ body {
   margin: 0 auto;
 }
 
+.viewfinder {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.viewfinder-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.viewfinder-placeholder {
+  position: absolute;
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
+}
+
 .motion-gate {
   text-align: center;
 }
